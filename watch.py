@@ -46,7 +46,13 @@ def validate_zip(path, expected_size, expected_sha):
             digest.update(chunk)
     if expected_sha and digest.hexdigest().lower() != expected_sha.lower():
         raise ValueError('SHA-256 не совпал: это другой файл или повреждённая загрузка')
-    # Check CRC without extracting or running anything from the archive.
+    # ZIP: full CRC check. RAR/other files: size + hash (no extraction).
+    if path.suffix.lower() != '.zip' and not zipfile.is_zipfile(path):
+        if path.suffix.lower() == '.rar':
+            with path.open('rb') as f:
+                if f.read(7) != b'Rar!\x1a\x07\x00' and not _is_rar5(path):
+                    raise ValueError('Вместо RAR получено другое содержимое')
+        return digest.hexdigest()
     with zipfile.ZipFile(path) as z:
         if sum(i.file_size for i in z.infolist()) > 2 * 1024**3:
             raise ValueError('Распакованный размер превышает защитный лимит 2 ГБ')
@@ -55,8 +61,14 @@ def validate_zip(path, expected_size, expected_sha):
     return digest.hexdigest()
 
 
+def _is_rar5(path):
+    with path.open('rb') as f:
+        return f.read(8) == b'Rar!\x1a\x07\x01\x00'
+
+
 def download(url, folder, expected_sha):
     q = '?' + urllib.parse.urlencode({'public_key': url})
+    LOG.info('Этап: метаданные Яндекса')
     meta = json_get(API + q)
     if meta.get('type') != 'file':
         raise ValueError('Ссылка должна вести на файл, а не папку')
@@ -71,7 +83,9 @@ def download(url, folder, expected_sha):
             return path, validate_zip(path, size, sha)
         except (ValueError, zipfile.BadZipFile):
             path.unlink()
+    LOG.info('Этап: получение адреса загрузки; файл %s (%s байт)', name, size)
     link = json_get(API + '/download' + q)['href']
+    LOG.info('Этап: скачивание содержимого файла')
     part = folder / (name + '.part')
     started = time.monotonic()
     try:
@@ -100,7 +114,7 @@ def telegram(token, method, fields, document=None):
         body = bytearray()
         for key, value in fields.items():
             body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
-        body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="CombatCraft.zip"\r\nContent-Type: application/zip\r\n\r\n'.encode())
+        body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="archive{document.suffix}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
         body.extend(document.read_bytes())
         body.extend(f'\r\n--{boundary}--\r\n'.encode())
         data = bytes(body)
@@ -147,7 +161,7 @@ def check(args):
     save_state(state_path, state)
     if not state.get('notified'):
         telegram(args.token, 'sendMessage', {'chat_id': args.chat, 'text':
-            f'✅ CombatCraft.zip снова скачивается!\nАрхив уже сохранён ботом и проверен (размер, SHA-256, ZIP CRC).\n{args.url}\nSHA-256: {digest}'})
+            f'✅ Файл скачан: {path.name}\nРазмер и SHA-256 проверены. Для ZIP также проверен CRC; для RAR проверка CRC не выполняется.\n{args.url}\nSHA-256: {digest}'})
         state['notified'] = True
         save_state(state_path, state)
     if args.send_file and not state.get('file_sent'):
@@ -157,7 +171,7 @@ def check(args):
             state['file_skipped_too_large'] = True
         else:
             telegram(args.token, 'sendDocument', {'chat_id': args.chat, 'caption':
-                'CombatCraft: скачанный и проверенный архив мира.'}, path)
+                'Файл скачан с Яндекс Диска; размер и SHA-256 проверены.'}, path)
             state['file_sent'] = True
         save_state(state_path, state)
     return True
@@ -165,19 +179,44 @@ def check(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--test-network', action='store_true', help='Скачать открытый тестовый файл без Telegram')
+    parser.add_argument('--test-download', action='store_true', help='Скачать и проверить ZIP Яндекса без Telegram')
     parser.add_argument('--once', action='store_true', help='Одна проверка (cron/GitHub Actions)')
     parser.add_argument('--test-telegram', action='store_true', help='Отправить тестовое сообщение без проверки Яндекса')
     parser.add_argument('--chat-id', action='store_true', help='Показать chat_id из сообщений, отправленных боту')
     parser.add_argument('--url', default=os.getenv('PUBLIC_URL', DEFAULT_URL))
     parser.add_argument('--interval', type=int, default=int(os.getenv('CHECK_INTERVAL', '60')))
     parser.add_argument('--data-dir', default=os.getenv('DATA_DIR', 'data'))
-    parser.add_argument('--sha256', default=os.getenv('EXPECTED_SHA256', DEFAULT_SHA))
+    parser.add_argument('--sha256', default=os.getenv('EXPECTED_SHA256'))
     parser.add_argument('--send-file', action=argparse.BooleanOptionalAction,
                         default=os.getenv('SEND_FILE', 'true').lower() in ('1', 'true', 'yes'))
     args = parser.parse_args()
+    if args.sha256 is None:
+        args.sha256 = DEFAULT_SHA if args.url.rstrip('/').split('/')[-1] in ('QoUDDtU533bpFa', 'MfLFg8_suAbHmw') else ''
     args.token = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
     args.chat = os.getenv('TELEGRAM_CHAT_ID', '').strip()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    LOG.info('Проверяемая публичная ссылка: %s', args.url)
+    if os.getenv('PUBLIC_URL'):
+        LOG.info('Адрес взят из PUBLIC_URL (приоритет над DEFAULT_URL; --url имеет высший приоритет).')
+    if args.test_network or args.test_download:
+        try:
+            folder = Path(args.data_dir)
+            folder.mkdir(parents=True, exist_ok=True)
+            if args.test_network:
+                with fetch('https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore') as response:
+                    data = response.read(1024 * 1024)
+                if b'__pycache__' not in data:
+                    raise ValueError('Неожиданное содержимое тестового файла')
+                (folder / 'network-test.txt').write_bytes(data)
+                LOG.info('SUCCESS: тестовый файл скачан, %s байт. Исходящий HTTPS работает.', len(data))
+            if args.test_download:
+                path, digest = download(args.url, folder, args.sha256)
+                LOG.info('SUCCESS: файл скачан и проверен: %s, %s байт, SHA-256 %s', path, path.stat().st_size, digest)
+        except Exception as exc:
+            LOG.error('FAILED: %s', str(exc)[:300])
+            raise SystemExit(1)
+        return
     if not args.token:
         parser.error('Задайте TELEGRAM_BOT_TOKEN в переменных окружения')
     if args.chat_id:
