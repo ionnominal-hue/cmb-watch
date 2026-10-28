@@ -1,0 +1,54 @@
+name: CombatCraft download watcher
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: 'Только тест Telegram'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: combatcraft-watcher
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PUBLIC_URL: https://disk.yandex.ru/d/QoUDDtU533bpFa
+      SEND_FILE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: cc-watch-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: cc-watch-v1-
+      - name: Test Telegram
+        if: ${{ inputs.test_telegram == true }}
+        run: python watch.py --test-telegram
+      - name: Check download
+        id: watch
+        if: ${{ inputs.test_telegram != true }}
+        run: python watch.py --once
+      - uses: actions/cache/save@v4
+        if: ${{ always() && steps.watch.outputs.changed == 'true' }}
+        with:
+          path: data
+          key: cc-watch-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Keep downloaded archive
+        if: ${{ always() && steps.watch.outputs.changed == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: CombatCraft-backup
+          path: data/*.zip
+          if-no-files-found: ignore
+          retention-days: 7
