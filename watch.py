@@ -13,7 +13,7 @@ import urllib.request
 import uuid
 import zipfile
 
-DEFAULT_URL = 'https://disk.yandex.ru/d/uwXWd7JOeyf8W'
+DEFAULT_URL = 'https://disk.yandex.ru/d/QoUDDtU533bpFa'
 DEFAULT_SHA = '91a90f11d33851a07df0c7a01932b4413a4cefade539df59a51c5855126dcd75'
 API = 'https://cloud-api.yandex.net/v1/disk/public/resources'
 LOG = logging.getLogger('watch')
